@@ -49,7 +49,7 @@ class MailChannel(models.Model):
                 config = env["ir.config_parameter"].sudo()
                 api_url = config.get_param("ai_internal.api_url")
 
-                error_message = "❌ Erreur, veuillez réessayer."
+                error_message = "Erreur, veuillez réessayer."
 
                 try:
 
@@ -62,7 +62,7 @@ class MailChannel(models.Model):
                             "message": text,
                             "sessionId": f"user_{uid}"
                         },
-                        timeout=60
+                        timeout=(5,60)
                     )
 
                     if response.status_code != 200:

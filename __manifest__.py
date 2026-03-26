@@ -12,6 +12,7 @@
     "assets": {
         "web.assets_backend": [
             "ai_discuss/static/src/css/style.css",
+            "ai_discuss/static/src/js/ai_stream.js",
         ],
     },
     "stallable": True,
