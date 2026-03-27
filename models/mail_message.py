@@ -13,48 +13,58 @@ class MailChannel(models.Model):
         message = super().message_post(**kwargs)
 
         try:
-            ai_user = self.env.ref("ai_internal_chatbot.user_ai_assistant")
+            config = self.env["ir.config_parameter"].sudo()
 
-            # Vérifier que c'est un chat privé
-            if self.channel_type == "chat" and ai_user.partner_id in self.channel_partner_ids:
+            partner_id_raw = config.get_param("assistant_id", 0)
+            partner_id = int(partner_id_raw) if partner_id_raw else 0
 
-                # Ne pas répondre aux messages du bot
-                if message.author_id != ai_user.partner_id:
+            if not partner_id:
+                return message
+
+            ai_partner = self.env["res.partner"].browse(partner_id)
+
+            if not ai_partner.exists():
+                _logger.warning("AI partner not found")
+                return message
+
+            self.invalidate_recordset()
+
+            if self.channel_type == 'chat' and partner_id in self.channel_partner_ids.ids:
+
+                if message.author_id.id != partner_id:
 
                     user_message = kwargs.get("body")
 
                     if user_message:
-                        # Lancer l'appel IA en arrière-plan
+
                         threading.Thread(
                             target=self._send_to_ai_background,
-                            args=(user_message, ai_user.id, self.id, self.env.uid)
+                            args=(user_message, partner_id, self.id, self.env.user.id),
+                            daemon=True
                         ).start()
 
         except Exception as e:
-            _logger.error("AI Internal Chat Error: %s", e)
+            _logger.error("Erreur détection AI : %s", e)
 
         return message
 
-    def _send_to_ai_background(self, text, ai_user_id, channel_id, uid):
+    def _send_to_ai_background(self, text, partner_id, channel_id, uid):
 
         with api.Environment.manage():
-
             registry = self.env.registry
-            with registry.cursor() as cr:
 
+            with registry.cursor() as cr:
                 env = api.Environment(cr, uid, {})
+
                 channel = env["mail.channel"].browse(channel_id)
-                ai_user = env["res.users"].browse(ai_user_id)
+                ai_partner = env["res.partner"].browse(partner_id)
 
                 config = env["ir.config_parameter"].sudo()
                 api_url = config.get_param("ai_internal.api_url")
 
-                error_message = "Erreur, veuillez réessayer."
-
                 try:
-
                     if not api_url:
-                        raise Exception("AI API URL not configured")
+                        raise Exception("API URL non configurée")
 
                     response = requests.post(
                         api_url,
@@ -62,32 +72,50 @@ class MailChannel(models.Model):
                             "message": text,
                             "sessionId": f"user_{uid}"
                         },
-                        timeout=(5,60)
+                        timeout=(10, 60)
                     )
 
                     if response.status_code != 200:
-                        raise Exception(f"API returned {response.status_code}")
+                        raise Exception(f"Erreur API {response.status_code}")
 
                     reply = response.text.strip()
 
                     if not reply:
-                        raise Exception("Empty AI response")
+                        raise Exception("Réponse vide")
+
+                    cr.commit()
+
+                    channel.invalidate_recordset()
 
                     channel.message_post(
                         body=reply,
-                        author_id=ai_user.partner_id.id,
+                        author_id=ai_partner.id,
+                        message_type='comment',
+                        subtype_id=env.ref('mail.mt_comment').id
+                    )
+
+                except requests.exceptions.Timeout:
+                    channel.message_post(
+                        body="Le délai de réponse est dépassé. Veuillez réessayer.",
+                        author_id=ai_partner.id,
+                        message_type='comment',
+                        subtype_id=env.ref('mail.mt_comment').id
+                    )
+
+                except requests.exceptions.ConnectionError:
+                    channel.message_post(
+                        body="Impossible de contacter le serveur IA.",
+                        author_id=ai_partner.id,
                         message_type='comment',
                         subtype_id=env.ref('mail.mt_comment').id
                     )
 
                 except Exception as e:
+                    _logger.error("AI Thread Error: %s", e)
 
-                    _logger.error("AI Request failed: %s", e)
-
-                    # envoyer message d'erreur à l'utilisateur
                     channel.message_post(
-                        body=error_message,
-                        author_id=ai_user.partner_id.id,
+                        body="Une erreur est survenue, veuillez réessayer.",
+                        author_id=ai_partner.id,
                         message_type='comment',
                         subtype_id=env.ref('mail.mt_comment').id
                     )
